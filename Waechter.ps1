@@ -4,7 +4,7 @@
 param([switch]$Tray, [string]$Join = "")
 $StartInTray = [bool]$Tray
 $JoinArg = [string]$Join
-$AppVersion = "1.3.0"
+$AppVersion = "1.3.1"
 $UpdateRepo = "voenji/waechter"   # GitHub "user/repo" that hosts version.txt and Waechter.ps1 (empty = no updates)
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -1184,7 +1184,7 @@ function Join-Party($code, $asHost) {
     $script:members = @{}; $script:lastMsgId = $null
     Start-Sub
     Publish "hello"
-    $script:nextBeat = (Get-Date).AddMinutes(4)
+    $script:nextBeat = (Get-Date).AddMinutes(2)
     Write-Log $(if ($asHost) { "Party created: $code" } else { "Joined party $code" }) (C 147 197 253)
     Refresh-Party
 }
@@ -1229,9 +1229,9 @@ function Pump-Party {
             } catch { }
         }
     }
-    # heartbeat every 4 min (only while L4D2 is open or was open in the last 30 min), drop members silent for 10 min
+    # heartbeat every 2 min (only while L4D2 is open or was open in the last 30 min), drop members silent for 10 min
     if ((Get-Date) -ge $script:nextBeat) {
-        $script:nextBeat = (Get-Date).AddMinutes(4)
+        $script:nextBeat = (Get-Date).AddMinutes(2)
         $idle = ($script:myStatus -eq "Game closed" -and ((Get-Date) - $script:closedSince).TotalMinutes -gt 30)
         if (-not $idle) { Publish "status" -Force }
         $changed = $false
