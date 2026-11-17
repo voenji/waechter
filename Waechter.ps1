@@ -4,7 +4,7 @@
 param([switch]$Tray, [string]$Join = "")
 $StartInTray = [bool]$Tray
 $JoinArg = [string]$Join
-$AppVersion = "1.2.1"
+$AppVersion = "1.3.0"
 $UpdateRepo = "voenji/waechter"   # GitHub "user/repo" that hosts version.txt and Waechter.ps1 (empty = no updates)
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -14,7 +14,7 @@ Add-Type -AssemblyName System.Net.Http
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Port      = 2121
-$Relay     = "https://ntfy.sh"
+$Relay     = "https://waechter-relay.l4d2compscene.workers.dev"
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Blacklist = Join-Path $Here "blacklist.txt"
 $LogFile   = Join-Path $Here "waechter_log.txt"
@@ -953,7 +953,8 @@ function Update-SteamLabel {
     if ($steamName) { $lblSteam.Text = "Steam: $steamName" } else { $lblSteam.Text = "Steam: not detected" }
 }
 
-# ---------------- party (relay via ntfy.sh, no IPs are ever sent) ----------------
+# ---------------- party (own Cloudflare relay, no IPs are ever sent) ----------------
+try { [Net.ServicePointManager]::DefaultConnectionLimit = 16 } catch { }
 $http = New-Object System.Net.Http.HttpClient
 $http.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
 $script:replay      = $false
@@ -975,12 +976,20 @@ function New-Code {
     $c = -join (1..4 | ForEach-Object { $chars[$r.Next($chars.Length)] })
     return "$a-$b-$c"
 }
-function Publish($type, $text = $null) {
+$script:lastStatusPub = [DateTime]::MinValue; $script:statusDirty = $false
+$script:pubTasks = New-Object System.Collections.ArrayList; $script:quotaWarned = $false
+function Publish($type, $text = $null, [switch]$Force) {
     if (-not $cfg.party) { return }
+    # keep status updates rare (max one every 20 s)
+    if ($type -eq "status" -and -not $Force) {
+        if (((Get-Date) - $script:lastStatusPub).TotalSeconds -lt 20) { $script:statusDirty = $true; return }
+    }
+    if ($type -eq "status") { $script:lastStatusPub = Get-Date; $script:statusDirty = $false }
     $msg = @{ v = 1; type = $type; text = $text; id = $cfg.id; name = $txtName.Text.Trim(); role = $(if ($cfg.host) { "host" } else { "member" }); status = $script:myStatus; ready = $script:myReady } | ConvertTo-Json -Compress
     try {
         $content = New-Object System.Net.Http.StringContent($msg, [System.Text.Encoding]::UTF8, "text/plain")
-        [void]$http.PostAsync("$Relay/$(Topic)", $content)
+        $pt = $http.PostAsync("$Relay/$(Topic)", $content)
+        if ($script:pubTasks.Count -lt 50) { [void]$script:pubTasks.Add($pt) }
     } catch { }
 }
 function Set-MyStatus($s) {
@@ -995,7 +1004,8 @@ function Start-Sub {
     Stop-Sub
     if (-not $cfg.party) { return }
     $since = if ($script:lastMsgId) { $script:lastMsgId } else { "10m" }
-    try { $script:subTask = $http.GetStreamAsync("$Relay/$(Topic)/json?since=$since") } catch { $script:nextSub = (Get-Date).AddSeconds(10) }
+    # long poll: the relay answers as soon as there is a new message (or after 25 s with nothing)
+    try { $script:subTask = $http.GetStringAsync("$Relay/$(Topic)/json?since=$since&wait=25") } catch { $script:nextSub = (Get-Date).AddSeconds(10) }
 }
 function Refresh-Party {
     $lvParty.BeginUpdate(); $lvParty.Items.Clear()
@@ -1151,7 +1161,7 @@ function Handle-PartyMessage($raw) {
     if ($isNew) {
         Write-Log "$name joined the party" (C 147 197 253)
         Play 'party'
-        if ($m.type -eq "hello") { Publish "status" }   # let newcomers see us
+        if ($m.type -eq "hello") { Publish "status" -Force }   # let newcomers see us
     }
     if ($m.role -eq "host" -and $oldStatus -ne $m.status -and -not $old) {
         if ($m.status -like "On official*") {
@@ -1174,7 +1184,7 @@ function Join-Party($code, $asHost) {
     $script:members = @{}; $script:lastMsgId = $null
     Start-Sub
     Publish "hello"
-    $script:nextBeat = (Get-Date).AddMinutes(2)
+    $script:nextBeat = (Get-Date).AddMinutes(4)
     Write-Log $(if ($asHost) { "Party created: $code" } else { "Joined party $code" }) (C 147 197 253)
     Refresh-Party
 }
@@ -1189,36 +1199,44 @@ function Leave-Party {
 }
 function Pump-Party {
     if (-not $cfg.party) { return }
-    # subscription
+    # subscription (long poll)
     if (-not $script:subTask) {
         if ((Get-Date) -ge $script:nextSub) { Start-Sub }
-    } elseif (-not $script:subReader) {
-        if ($script:subTask.IsCompleted) {
-            if ($script:subTask.IsFaulted -or $script:subTask.IsCanceled) {
-                Stop-Sub; $script:nextSub = (Get-Date).AddSeconds(10)
-            } else {
-                $script:subReader = New-Object System.IO.StreamReader($script:subTask.Result)
-                $script:lineTask = $script:subReader.ReadLineAsync()
+    } elseif ($script:subTask.IsCompleted) {
+        $t = $script:subTask; $script:subTask = $null
+        if ($t.IsFaulted -or $t.IsCanceled) {
+            $script:nextSub = (Get-Date).AddSeconds(5)
+        } else {
+            foreach ($line in ($t.Result -split "`n")) {
+                if ($line.Trim()) { Handle-PartyMessage $line; $script:replay = $false }
+                if (-not $cfg.party) { break }
             }
-        }
-    } else {
-        $n = 0
-        while ($script:lineTask -and $script:lineTask.IsCompleted -and $n -lt 20) {
-            $n++
-            if ($script:lineTask.IsFaulted -or $null -eq $script:lineTask.Result) {
-                Stop-Sub; $script:nextSub = (Get-Date).AddSeconds(5); break
-            }
-            Handle-PartyMessage $script:lineTask.Result
-            $script:replay = $false
-            $script:lineTask = $script:subReader.ReadLineAsync()
+            $script:nextSub = [DateTime]::MinValue
         }
     }
-    # heartbeat every 2 min, drop members silent for 5 min
+    # send a status that was held back by the 20 s limit
+    if ($script:statusDirty -and ((Get-Date) - $script:lastStatusPub).TotalSeconds -ge 20) { Publish "status" }
+    # check sent messages: 429 = the relay's daily limit for this internet connection is used up
+    foreach ($pt in @($script:pubTasks)) {
+        if ($pt.IsCompleted) {
+            [void]$script:pubTasks.Remove($pt)
+            try {
+                if (-not $pt.IsFaulted -and [int]$pt.Result.StatusCode -eq 429 -and -not $script:quotaWarned) {
+                    $script:quotaWarned = $true
+                    Write-Log "Party relay limit reached for your internet - your party can't see you right now (resets within a day)" $cRed
+                    Add-Chat "Waechter" "Your messages can't be sent right now (relay daily limit for your internet). The others can't see you until it resets." $cRed
+                }
+            } catch { }
+        }
+    }
+    # heartbeat every 4 min (only while L4D2 is open or was open in the last 30 min), drop members silent for 10 min
     if ((Get-Date) -ge $script:nextBeat) {
-        $script:nextBeat = (Get-Date).AddMinutes(2); Publish "status"
+        $script:nextBeat = (Get-Date).AddMinutes(4)
+        $idle = ($script:myStatus -eq "Game closed" -and ((Get-Date) - $script:closedSince).TotalMinutes -gt 30)
+        if (-not $idle) { Publish "status" -Force }
         $changed = $false
         foreach ($k in @($script:members.Keys)) {
-            if (((Get-Date) - $script:members[$k].seen).TotalMinutes -gt 5) { $script:members.Remove($k); $changed = $true }
+            if (((Get-Date) - $script:members[$k].seen).TotalMinutes -gt 10) { $script:members.Remove($k); $changed = $true }
         }
         if ($changed) { Refresh-Party }
     }
@@ -2043,7 +2061,7 @@ $form.Add_FormClosing({
     try { Show-Summary } catch { }
     try { $cfg.ox = $ov.Location.X; $cfg.oy = $ov.Location.Y; $ov.Close() } catch { }
     try { $trayIcon.Visible = $false; $trayIcon.Dispose() } catch { }
-    if ($cfg.party) { $script:myStatus = "Offline"; Publish "status"; Start-Sleep -Milliseconds 400 }
+    if ($cfg.party) { $script:myStatus = "Offline"; Publish "status" -Force; Start-Sleep -Milliseconds 400 }
     try { if ($script:client) { $script:client.Close() } } catch { }
     $cfg.name = $txtName.Text.Trim(); Save-Settings
 })
