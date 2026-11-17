@@ -4,7 +4,7 @@
 param([switch]$Tray, [string]$Join = "")
 $StartInTray = [bool]$Tray
 $JoinArg = [string]$Join
-$AppVersion = "1.3.1"
+$AppVersion = "1.3.2"
 $UpdateRepo = "voenji/waechter"   # GitHub "user/repo" that hosts version.txt and Waechter.ps1 (empty = no updates)
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -788,7 +788,7 @@ $cSet.Controls.Add($btnFolder)
 $cInfo = New-Card 28 376 804 200
 $pgSet.Controls.Add($cInfo)
 $cInfo.Controls.Add((New-Label "HOTKEYS AND INFO" 16 12 300 22 $fHead $cText))
-$cInfo.Controls.Add((New-Label ("Ctrl+Shift+1-4   quick messages (Queue now, 2 min, brb, gg)`nCtrl+Shift+5   countdown (starts the queue at 0)`nCtrl+Shift+R   ready / not ready`n`nWaechter v$AppVersion  -  updates install automatically when Waechter starts.`nSteam launch option needed:  -netconport 2121") 16 44 770 140 $fSmall (C 191 210 240)))
+$cInfo.Controls.Add((New-Label ("Ctrl+Shift+1-4   quick messages (Queue now, 2 min, brb, gg)`nCtrl+Shift+5   countdown (starts the queue at 0)`nCtrl+Shift+R   ready / not ready`n`nWaechter v$AppVersion  -  updates install automatically when Waechter starts.`nSteam launch option needed:  -netconport 2121`nWaechter sends your Steam name and Steam ID to the developer (to count how many people use it).") 16 44 770 140 $fSmall (C 191 210 240)))
 foreach ($cb in @($chkActive, $chkSound, $chkOverlay, $chkAuto, $chkRoom)) { $cb.Add_MouseEnter({ Play 'hover' }); $cb.Add_MouseDown({ Play 'click' }) }
 
 $tips = New-Object System.Windows.Forms.ToolTip
@@ -949,6 +949,22 @@ function Refresh-Blacklist {
     Get-Content $Blacklist | Where-Object { $_.Trim() -ne "" } | ForEach-Object { [void]$lstBlack.Items.Add($_) }
 }
 function Is-Local($ip) { return ($ip -match '^(loopback|localhost|0\.0\.0\.0|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)') }
+# user count for the developer: Steam name + Steam ID + version (told to the user in Settings)
+$script:statsDone = $false; $script:statsNext = [DateTime]::MinValue; $script:statsTries = 0
+function Send-Stats {
+    $script:statsNext = (Get-Date).AddMinutes(2); $script:statsTries++
+    try {
+        $acc = 0
+        try { $acc = [int64](Get-ItemProperty -Path "HKCU:\Software\Valve\Steam\ActiveProcess" -Name "ActiveUser" -ErrorAction Stop).ActiveUser } catch { }
+        $sid = if ($acc -gt 0) { [string]([int64]76561197960265728 + $acc) } else { "" }
+        $nm = Get-SteamName; if (-not $nm) { $nm = [string]$cfg.name }
+        # without a Steam ID (Steam not running yet) try again every 2 min, after 1 hour send without it
+        if (-not $sid -and $script:statsTries -lt 30) { return }
+        $body = @{ sid = $sid; name = [string]$nm; ver = $AppVersion; wid = [string]$cfg.id } | ConvertTo-Json -Compress
+        [void]$http.PostAsync("$Relay/stats", (New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")))
+        if ($sid -or $script:statsTries -ge 30) { $script:statsDone = $true }
+    } catch { }
+}
 function Update-SteamLabel {
     if ($steamName) { $lblSteam.Text = "Steam: $steamName" } else { $lblSteam.Text = "Steam: not detected" }
 }
@@ -1807,7 +1823,7 @@ function Get-A2SPlayers($key) {
 # ---------------- events ----------------
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 150
-$timer.Add_Tick({ Pump-Game; Pump-Party; Tick-Queue })
+$timer.Add_Tick({ Pump-Game; Pump-Party; Tick-Queue; if (-not $script:statsDone -and (Get-Date) -ge $script:statsNext) { Send-Stats } })
 
 $btnSteam.Add_Click({
     $script:steamName = Get-SteamName; Update-SteamLabel
