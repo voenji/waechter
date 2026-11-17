@@ -4,7 +4,7 @@
 param([switch]$Tray, [string]$Join = "")
 $StartInTray = [bool]$Tray
 $JoinArg = [string]$Join
-$AppVersion = "1.2.0"
+$AppVersion = "1.2.1"
 $UpdateRepo = "voenji/waechter"   # GitHub "user/repo" that hosts version.txt and Waechter.ps1 (empty = no updates)
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -1299,6 +1299,16 @@ $script:isChecked = $true; $script:statusSent = $false; $script:nextConnect = [D
 $buf = New-Object byte[] 65536
 
 function Send-Cmd($cmd) { try { $b = [System.Text.Encoding]::ASCII.GetBytes("$cmd`n"); $script:stream.Write($b, 0, $b.Length) } catch { } }
+# L4D2 refuses a connect while you are still on a server - so always disconnect first, then connect
+$script:joinTimer = New-Object System.Windows.Forms.Timer
+$script:joinTimer.Interval = 1500
+$script:joinKey = $null
+$script:joinTimer.Add_Tick({ $script:joinTimer.Stop(); if ($script:joinKey) { Send-Cmd "connect $($script:joinKey)"; $script:joinKey = $null } })
+function Join-Game($key) {
+    Send-Cmd "disconnect"
+    $script:joinKey = $key
+    $script:joinTimer.Stop(); $script:joinTimer.Start()
+}
 function Drop-Connection {
     try { $script:client.Close() } catch { }
     $script:client = $null; $script:stream = $null; $script:pending = ""
@@ -1408,7 +1418,7 @@ function Pump-Game {
                 Write-Log "Connected to L4D2" $cGreen
                 Set-MyStatus "In menu"
                 if ($script:pendingGo) {
-                    if ((Get-Date) -lt $script:pendingGo.until) { Write-Log "Joining the queued game" $cGreen; Send-Cmd "connect $($script:pendingGo.key)" }
+                    if ((Get-Date) -lt $script:pendingGo.until) { Write-Log "Joining the queued game" $cGreen; Join-Game $script:pendingGo.key }
                     $script:pendingGo = $null
                 }
             } else { $c.Close() }
@@ -1662,7 +1672,7 @@ function Go-Server($s) {
 }
 function Connect-To($key) {
     if ($script:q) { $script:q.connectAt = Get-Date }
-    if ($script:client) { Send-Cmd "connect $key" }
+    if ($script:client) { Join-Game $key }
     else {
         $script:pendingGo = @{ key = $key; until = (Get-Date).AddSeconds(90) }
         Write-Log "Start L4D2 - Waechter connects you as soon as the game is open" $cYellow
@@ -1704,7 +1714,7 @@ function Queue-Joined {
 function Handle-QueueLine($line) {
     $qq = $script:q; if (-not $qq -or -not $qq.joining) { return }
     if ($line -match '(?i)unreserved|reservation') { return }
-    if ($qq.connectAt -and ((Get-Date) - $qq.connectAt).TotalSeconds -lt 1.5) { return }
+    if ($qq.connectAt -and ((Get-Date) - $qq.connectAt).TotalSeconds -lt 3.5) { return }
     if ($line -match '(?i)^\s*Disconnect:|server is full|connection rejected|lobby only|enforcing|#Valve_Reject|Connection failed') { Join-Failed "server refused" }
 }
 
