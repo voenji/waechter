@@ -4,7 +4,7 @@
 param([switch]$Tray, [string]$Join = "")
 $StartInTray = [bool]$Tray
 $JoinArg = [string]$Join
-$AppVersion = "1.3.2"
+$AppVersion = "1.4.0"
 $UpdateRepo = "voenji/waechter"   # GitHub "user/repo" that hosts version.txt and Waechter.ps1 (empty = no updates)
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -1482,9 +1482,22 @@ function Pump-Game {
 $LearnedFile = Join-Path $Here "valve_servers.txt"
 $PartyMax = 4
 # addresses of Valve's official L4D2 machines (Valve's own data centers + the machines Valve rents)
+# Valve runs up to ~380 game servers per machine, on ports 27015 - 27400. Only regions ticked in Play are scanned.
+function Get-IpRange($pre, $from, $to) { return ,@($from..$to | ForEach-Object { "$pre.$_" }) }
 $script:SeedSets = @(
-    @{ ips = @("162.254.198.133", "162.254.198.134", "162.254.192.132", "162.254.192.133", "155.133.246.90", "155.133.246.91"); lo = 27015; hi = 27078 },
-    @{ ips = @((185..191 | ForEach-Object { "65.109.72.$_" }) + (210..216 | ForEach-Object { "157.180.58.$_" }) + (165..182 | ForEach-Object { "89.222.108.$_" }) + (206..214 | ForEach-Object { "138.199.142.$_" })); lo = 27015; hi = 27115 }
+    # Europe: Stockholm, Madrid, Frankfurt (Valve) + Falkenstein / Helsinki (rented)
+    @{ r = "Europe"; ips = @((Get-IpRange "162.254.198" 133 134) + (Get-IpRange "155.133.246" 90 91) + (Get-IpRange "155.133.226" 125 126)); lo = 27015; hi = 27400 },
+    @{ r = "Europe"; ips = @((185..191 | ForEach-Object { "65.109.72.$_" }) + (210..216 | ForEach-Object { "157.180.58.$_" }) + (165..182 | ForEach-Object { "89.222.108.$_" }) + (206..214 | ForEach-Object { "138.199.142.$_" })); lo = 27015; hi = 27115 },
+    # North America: US East (Virginia), US SouthWest (Los Angeles), US West (Washington)
+    @{ r = "North America"; ips = @((Get-IpRange "162.254.192" 132 135) + (Get-IpRange "162.254.195" 154 158) + (Get-IpRange "155.133.254" 115 118)); lo = 27015; hi = 27400 },
+    # South America: Peru, Chile
+    @{ r = "South America"; ips = @((Get-IpRange "155.133.244" 68 70) + (Get-IpRange "155.133.244" 75 77) + (Get-IpRange "155.133.249" 204 207)); lo = 27015; hi = 27400 },
+    # Asia: Hong Kong, Singapore, Japan, Dubai, India
+    @{ r = "Asia"; ips = @((Get-IpRange "103.28.54" 211 215) + (Get-IpRange "103.10.124" 52 53) + (Get-IpRange "45.121.184" 68 70) + (Get-IpRange "185.25.183" 196 197) + @("155.133.225.23", "155.133.224.30")); lo = 27015; hi = 27400 },
+    # Oceania: Sydney
+    @{ r = "Oceania"; ips = (Get-IpRange "103.10.125" 36 37); lo = 27015; hi = 27400 },
+    # Other: South Africa
+    @{ r = "Other"; ips = @("155.133.238.44", "155.133.238.49", "155.133.238.83"); lo = 27015; hi = 27400 }
 )
 $A2SReq = [byte[]](@(0xFF, 0xFF, 0xFF, 0xFF, 0x54) + [System.Text.Encoding]::ASCII.GetBytes("Source Engine Query") + @(0))
 $script:q = $null; $script:udp = $null; $script:pendingGo = $null
@@ -1499,7 +1512,8 @@ function Add-Learned($ip) {
 function Get-QueueTargets {
     $list = New-Object System.Collections.Generic.List[string]
     $seen = @{}
-    $sets = @($script:SeedSets)
+    $regs = @($cfg.regions); if (-not $regs.Count) { $regs = @($AllRegions) }
+    $sets = @($script:SeedSets | Where-Object { -not $_.r -or $regs -contains $_.r })
     if (Test-Path $LearnedFile) {
         $l = @(Get-Content $LearnedFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' })
         if ($l.Count) { $sets += @{ ips = $l; lo = 27015; hi = 27115 } }
@@ -1536,6 +1550,7 @@ function Open-Udp {
     if ($script:udp) { return $true }
     try {
         $script:udp = New-Object System.Net.Sockets.UdpClient(0)
+        try { $script:udp.Client.ReceiveBufferSize = 4194304 } catch { }
         try { [void]$script:udp.Client.IOControl([int]-1744830452, [byte[]](0, 0, 0, 0), $null) } catch { }   # ignore "port unreachable"
         return $true
     } catch { $script:udp = $null; return $false }
@@ -1628,7 +1643,7 @@ function Finish-Scan($sc) {
     $list = @()
     foreach ($k in @($sc.found.Keys)) {
         $s = $sc.found[$k]
-        if ($s.name -notmatch '^Valve Left ?4 ?Dead') { continue }
+        if ($s.name -notmatch '^Valve Left ?4 ?Dead' -or ([string]$s.folder -and [string]$s.folder -ne 'left4dead2')) { continue }
         $humans = [Math]::Max(0, $s.players - $s.bots)
         $list += [pscustomobject]@{ key = $k; ip = $k.Split(':')[0]; name = $s.name; map = ([string]$s.map).ToLower(); humans = $humans; max = $s.max;
                                     mode = (Get-Mode $s.keywords); region = (Get-Region $s.name); ping = 999 }
